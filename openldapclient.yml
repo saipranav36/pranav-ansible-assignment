@@ -1,0 +1,26 @@
+---
+- name: openldap client play
+  hosts: openldapclient
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: set hostname
+      shell: hostnamectl set-hostname openldapclient
+    - name: edit hosts file
+      lineinfile:
+        dest: /etc/hosts
+        line: "{{ item }}"
+      with_items:
+        - '10.0.2.20 openldapserver.itzgeek.local openldapserver'
+        - '10.0.2.12 openldapclient.itzgeek.local openldapclient'
+    - name: install openldap client packages
+      yum:
+        name: ['openldap-clients','nss-pam-ldapd']
+        state: present
+    - name: add ldapclient to ldapserver
+      shell: authconfig --enableldap --enableldapauth --ldapserver=10.0.2.20 --ldapbasedn="dc=itzgeek,dc=local" 
+             --enablemkhomedir --update 
+    - name: restart ldap client service
+      service:
+        name: nslcd
+        state: restarted
