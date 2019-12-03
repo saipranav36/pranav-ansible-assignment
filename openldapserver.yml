@@ -1,0 +1,186 @@
+---
+- name: mysql playbook
+  hosts: openldapserver
+  become: yes
+  gather_facts: yes
+  vars:
+    out:
+    out2:
+  tasks:
+    - name: Download MySQL Community Repo
+      get_url:
+        url: http://repo.mysql.com/mysql-community-release-el7-7.noarch.rpm
+        dest: /tmp
+
+    - name: install mysql community repo
+      yum:
+        name: /tmp/mysql-community-release-el7-7.noarch.rpm
+        state: present
+      
+    - name: install mysql server & MySQL-python
+      yum: 
+        name: ['mysql-server','MySQL-python']
+        state: present
+ 
+    - name: start mysqld service
+      service: name=mysqld enabled=yes state=started
+    - name: install openldapserver packages
+      yum:
+        name: ['openldap','compat-openldap','openldap-clients','openldap-servers','openldap-servers-sql',
+              'openldap-devel']
+        state: present
+    - name: enable & start ldap daemon
+      service: name=slapd enabled=yes state=started
+
+    - name: install python-devel,epel-release
+      yum: 
+        name: ["python-devel","epel-release"]
+        state: present
+
+    - name: Install Development tools
+      yum:
+        name: "@Development tools"
+        state: present
+
+    - name: install python-pip
+      yum: name=python-pip state=present
+
+    - name: install python-ldap
+      pip:
+        name: python-ldap
+       
+    - name: set hostname
+      shell: hostnamectl set-hostname openldapserver
+    - name: change /etc/hosts file
+      lineinfile:
+        dest: /etc/hosts
+        line: "{{ item }}"
+      with_items:
+        - '10.0.2.20 openldapserver.itzgeek.local openldapserver'
+        - '10.0.2.12 openldapclient.itzgeek.local openldapclient'
+    - name: setup ldapadm password
+      shell: slappasswd -h {SSHA} -s ldapadm
+      register: out
+
+    - name: debug LDAPADM PASSWD
+      debug:
+        var: out.stdout
+    - name: set domain,admin,admin password--
+      ldap_attr:
+        dn: olcDatabase={2}hdb,cn=config
+        name: "{{ item.key }}"
+        values: "{{ item.value }}"
+        state: exact
+      with_dict:
+        olcSuffix: dc=itzgeek,dc=local
+        olcRootDN: cn=ldapadm,dc=itzgeek,dc=local
+        olcRootPW: "{{ out.stdout }}"
+    - name: set monitor.ldif
+      ldap_attr:
+        dn: olcDatabase={1}monitor,cn=config
+        name: olcAccess
+        values: 
+          - >-
+            {0}to * by dn.base="gidNumber=0+uidNumber=0,cn=peercred,cn=external, cn=auth" 
+            read by dn.base="cn=ldapadm,dc=itzgeek,dc=local" read by * none
+        state: exact
+    - name: Copy the sample database configuration file to /var/lib/ldap and update the file permissions
+      shell: "{{ item }}"
+      with_items:
+        - 'cp /usr/share/openldap-servers/DB_CONFIG.example /var/lib/ldap/DB_CONFIG'
+        - 'chown ldap:ldap /var/lib/ldap/*'
+    - name: create database events and table rc
+      command: "{{ item }}"
+      with_items:
+        - 'mysql --user=root --password="" --execute="create database if not exists events"'
+        - 'mysql --user=root --password="" events --execute="create table if not exists 
+           rc(id int not null primary key auto_increment,counter int not null)"'
+    - name: execute select query on rc table
+      command: mysql --user=root --password="" events --execute="select counter from rc"
+      register: out2
+    - block:
+        - name: add cosine.ldif to /etc/openldap/slapd.d/cn=config/cn=schema
+          shell: "{{item}}"
+          with_items:
+            - 'ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/openldap/schema/cosine.ldif'
+            - 'ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/openldap/schema/nis.ldif'
+            - 'ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/openldap/schema/inetorgperson.ldif'
+
+        - name: insert into rc table
+          command: mysql --user=root --password="" events --execute="insert into rc (counter) values (1)"
+      when: out2.stdout_lines|length==0
+
+    - block:
+        - name: build & generate domain
+          ldap_entry:
+            dn: dc=itzgeek,dc=local
+            objectClass:
+              - top
+              - domain
+            bind_dn: cn=ldapadm,dc=itzgeek,dc=local
+            bind_pw: ldapadm
+        - name: build & generate ldapadm
+          ldap_entry:
+            dn: cn=ldapadm,dc=itzgeek,dc=local
+            objectClass: organizationalRole
+            attributes:
+              cn: ldapadm
+              description: LDAP ADMIN 
+            bind_dn: cn=ldapadm,dc=itzgeek,dc=local
+            bind_pw: ldapadm
+        - name: build & generate People
+          ldap_entry:
+            dn: ou=People,dc=itzgeek,dc=local
+            objectClass: organizationalUnit
+            attributes:
+              ou: People
+            bind_dn: cn=ldapadm,dc=itzgeek,dc=local
+            bind_pw: ldapadm
+        - name: build & generate Group
+          ldap_entry:
+            dn: ou=Group,dc=itzgeek,dc=local
+            objectClass: organizationalUnit
+            attributes:
+              ou: Group
+            bind_dn: cn=ldapadm,dc=itzgeek,dc=local
+            bind_pw: ldapadm
+        - name: create group  smuuser
+          ldap_entry:
+            dn: cn=smuuser,ou=Group,dc=itzgeek,dc=local
+            objectClass:
+              - top
+              - posixGroup
+            attributes:
+              cn: smuuser
+              gidNumber: 1001
+            bind_dn: cn=ldapadm,dc=itzgeek,dc=local
+            bind_pw: ldapadm
+        - name: create user smuuser
+          ldap_entry:
+           dn: uid=smuuser,ou=People,dc=itzgeek,dc=local
+           objectClass:
+             - top
+             - account
+             - posixAccount
+             - shadowAccount
+           attributes:
+             cn: smuuser
+             uid: smuuser
+             uidNumber: 1001
+             gidNumber: 1001
+             homeDirectory: /home/smuuser
+             loginShell: /bin/bash
+             userPassword: "{crypt}x"
+
+           bind_dn: cn=ldapadm,dc=itzgeek,dc=local
+           bind_pw: ldapadm
+    - name: give password to smuuser
+      command: ldappasswd -s smu1234 -x -D "cn=ldapadm,dc=itzgeek,dc=local" -w ldapadm 
+               "uid=smuuser,ou=People,dc=itzgeek,dc=local"
+    - name: Add LDAP service to firewall
+      shell: "{{ item }}"
+      with_items:
+        - 'firewall-cmd --permanent --add-service=ldap'
+        - 'firewall-cmd --reload' 
+
+              
